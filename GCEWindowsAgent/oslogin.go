@@ -56,12 +56,34 @@ func (o *osloginMgr) set() error {
 	enable := newMetadata.Instance.Attributes.EnableOSLogin || newMetadata.Project.Attributes.EnableOSLogin
 	twofactor := newMetadata.Instance.Attributes.TwoFactor || newMetadata.Project.Attributes.TwoFactor
 
+	ret := func() string {
+		if enable {
+			if twofactor {
+				return "enabled, with two-factor authentication"
+			}
+			return "enabled"
+		}
+		return "disabled"
+	}
+	logger.Infof("OS Login is %s", ret())
+
 	if enable && !oldEnable {
-		logger.Infof("Enabling OS Login")
+		// runs on every new startup and on every change. we can't know
+		// the state before startup so we have to do this to be sure.
 		newMetadata.Instance.Attributes.SSHKeys = nil
 		newMetadata.Project.Attributes.SSHKeys = nil
 		(&accountsMgr{}).set()
 	}
+
+	//if !enable && oldEnable {
+	// TODO this can run at the same time as main called manager IF
+	// we are enabling and changing at the same time.
+	// there's also a special case if we toggle twice without an intervening run, because the oldmetadata will be the one with nil'd keys from above.
+	//
+	// but if we don't do this run below and we aren't the double-toggle case above, ssh key users won't be set back up until next md change.
+	// we have no way of signaling async to the manager bc we don't know if it has run by this point. we can either run it ourselves or set the diff logic for accountsMgr to notice this case.
+	//(&accountsMgr{}).set()
+	//}
 
 	if err := updateSSHConfig(enable, twofactor); err != nil {
 		logger.Errorf("Error updating SSH config: %v.", err)
@@ -83,16 +105,22 @@ func (o *osloginMgr) set() error {
 		logger.Errorf("Error creating OS Login sudoers file: %v.", err)
 	}
 
-	// Services which need to be restarted primarily due to caching issues.
-	for _, svc := range []string{"ssh", "sshd", "nscd", "unscd", "systemd-logind", "cron", "crond"} {
-		if err := restartService(svc); err != nil {
-			logger.Errorf("Error restarting service: %v.", err)
+	if enable {
+		if err := runCmd(exec.Command("google_oslogin_nss_cache")); err != nil {
+			logger.Errorf("Error updating NSS cache: %v.", err)
 		}
 	}
 
-	if enable {
-		if err := exec.Command("google_oslogin_nss_cache").Run(); err != nil {
-			logger.Errorf("Error updating NSS cache: %v.", err)
+	if enable == oldEnable {
+		return nil
+	}
+
+	// Services which need to be restarted primarily due to caching issues.
+	// TODO: only do this if needed.
+	for _, svc := range []string{"ssh", "sshd", "nscd", "unscd", "systemd-logind", "cron", "crond"} {
+		logger.Debugf("osloginMgr: restarting service %q", svc)
+		if err := restartService(svc); err != nil {
+			logger.Errorf("Error restarting service: %v.", err)
 		}
 	}
 
@@ -108,10 +136,12 @@ func filterGoogleLines(contents string) []string {
 			isgoogle = true
 		case isgoogle:
 			isgoogle = false
-		case isgoogleblock, strings.Contains(line, googleBlockStart):
+		case strings.Contains(line, googleBlockStart):
 			isgoogleblock = true
 		case strings.Contains(line, googleBlockEnd):
 			isgoogleblock = false
+		case isgoogleblock:
+			isgoogleblock = true
 		default:
 			filtered = append(filtered, line)
 		}
@@ -155,7 +185,7 @@ func updateSSHConfig(enable, twofactor bool) error {
 		if err != nil {
 			return err
 		}
-		defer closeFile(file)
+		defer closer(file)
 		file.WriteString(proposed)
 	}
 
@@ -191,7 +221,7 @@ func updateNSSwitchConfig(enable bool) error {
 		if err != nil {
 			return err
 		}
-		defer closeFile(file)
+		defer closer(file)
 		file.WriteString(proposed)
 	}
 	return nil
@@ -233,7 +263,7 @@ func updatePAMConfig(enable, twofactor bool) error {
 		if err != nil {
 			return err
 		}
-		defer closeFile(file)
+		defer closer(file)
 		file.WriteString(proposed)
 	}
 
@@ -253,7 +283,7 @@ func updatePAMConfig(enable, twofactor bool) error {
 		if err != nil {
 			return err
 		}
-		defer closeFile(file2)
+		defer closer(file2)
 		file2.WriteString(proposed)
 	}
 
@@ -305,7 +335,7 @@ func restartService(servicename string) error {
 	if err == nil && strings.Contains(init, "systemd") {
 		if systemctl, err := exec.LookPath("systemctl"); err == nil {
 			if exec.Command(systemctl, "is-active", servicename+".service").Run() == nil {
-				return exec.Command(systemctl, "restart", servicename+".service").Run()
+				return runCmd(exec.Command(systemctl, "restart", servicename+".service"))
 			}
 			return nil
 		}
@@ -313,14 +343,14 @@ func restartService(servicename string) error {
 	service, err := exec.LookPath("service")
 	if err == nil {
 		if exec.Command(service, servicename, "status").Run() == nil {
-			return exec.Command(service, servicename, "restart").Run()
+			return runCmd(exec.Command(service, servicename, "restart"))
 		}
 		return nil
 	}
 	initService := "/etc/init.d/" + servicename
 	if _, err := os.Stat(initService); err == nil {
 		if exec.Command(initService, "status").Run() == nil {
-			return exec.Command(initService, "restart").Run()
+			return runCmd(exec.Command(initService, "restart"))
 		}
 		return nil
 	}

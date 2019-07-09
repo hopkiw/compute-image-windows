@@ -42,7 +42,7 @@ type metadata struct {
 }
 
 type virtualClock struct {
-	DriftToken int
+	DriftToken int `json:",string"`
 }
 
 type instance struct {

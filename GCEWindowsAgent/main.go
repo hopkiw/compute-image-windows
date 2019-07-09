@@ -12,7 +12,7 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
-// GCEWindowsAgent is the Google Compute Engine Windows agent executable.
+// google_guest_agent is the Google Compute Engine Windows agent executable.
 package main
 
 import (
@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -34,12 +35,13 @@ import (
 )
 
 var (
-	programName              = "GCEWindowsAgent"
+	programName              = "google_guest_agent"
 	version                  string
 	ticker                   = time.Tick(70 * time.Second)
 	oldMetadata, newMetadata *metadata
 	config                   *ini.File
 	osRelease                release
+	debug                    = "false"
 )
 
 const (
@@ -95,13 +97,6 @@ func parseConfig(file string) (*ini.File, error) {
 	return cfg, nil
 }
 
-func closeFile(c io.Closer) {
-	err := c.Close()
-	if err != nil {
-		logger.Warningf("Error closing file: %v.", err)
-	}
-}
-
 func runUpdate() {
 	cfgPath := configPath
 	if runtime.GOOS == "windows" {
@@ -119,7 +114,7 @@ func runUpdate() {
 	if runtime.GOOS == "windows" {
 		mgrs = []manager{newWsfcManager(), &addressMgr{}, &winAccountsMgr{}}
 	} else {
-		mgrs = []manager{&clockskewMgr{}}
+		mgrs = []manager{&clockskewMgr{}, &accountsMgr{}, &addressMgr{}, &osloginMgr{}}
 	}
 	for _, mgr := range mgrs {
 		wg.Add(1)
@@ -128,6 +123,7 @@ func runUpdate() {
 			if mgr.disabled(runtime.GOOS) || (!mgr.timeout() && !mgr.diff()) {
 				return
 			}
+			logger.Debugf("running %#v.set()", mgr)
 			if err := mgr.set(); err != nil {
 				logger.Errorf("error running %#v manager: %s", mgr, err)
 			}
@@ -150,6 +146,7 @@ func run(ctx context.Context) {
 		for {
 			var err error
 			newMetadata, err = watchMetadata(ctx)
+			logger.Debugf("got newMetadata")
 			if err != nil {
 				// Only log the second web error to avoid transient errors and
 				// not to spam the log on network failures.
@@ -187,7 +184,7 @@ func run(ctx context.Context) {
 func runCmd(cmd *exec.Cmd) error {
 	err := cmd.Run()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+		if ee, ok := err.(*exec.ExitError); ok && string(ee.Stderr) != "" && string(ee.Stderr) != "." {
 			return fmt.Errorf(string(ee.Stderr))
 		}
 		return err
@@ -217,14 +214,19 @@ func closer(c io.Closer) {
 }
 
 func main() {
+	var debugEnabled bool
+	debugEnabled, err := strconv.ParseBool(debug)
+	if err != nil {
+		debugEnabled = false
+	}
 	var opts logger.LogOpts
 	if runtime.GOOS == "windows" {
-		opts = logger.LogOpts{LoggerName: programName, FormatFunction: logFormat}
+		opts = logger.LogOpts{Debug: debugEnabled, LoggerName: programName, FormatFunction: logFormat}
 	} else {
-		opts = logger.LogOpts{LoggerName: programName, Stdout: true}
+		opts = logger.LogOpts{Debug: debugEnabled, LoggerName: programName, Stdout: true}
 	}
 
-	var err error
+	//var err error
 	ctx := context.Background()
 	newMetadata, err = getMetadata(ctx, false)
 	if err == nil {

@@ -358,7 +358,7 @@ var osrelease release
 // On SLES, it instead calls enableSLESInterfaces.
 func enableNetworkInterfaces(interfaces []net.Interface) error {
 	var googleInterfaces []string
-	for _, ni := range newMetadata.Instance.NetworkInterfaces {
+	for _, ni := range newMetadata.Instance.NetworkInterfaces[1:] {
 		iface, err := getInterfaceByMAC(ni.Mac, interfaces)
 		if err != nil {
 			if !containsString(ni.Mac, badMAC) {
@@ -367,7 +367,11 @@ func enableNetworkInterfaces(interfaces []net.Interface) error {
 			}
 			continue
 		}
+		logger.Debugf("will manage interface %s", iface.Name)
 		googleInterfaces = append(googleInterfaces, iface.Name)
+	}
+	if len(googleInterfaces) == 0 {
+		return nil
 	}
 
 	switch {

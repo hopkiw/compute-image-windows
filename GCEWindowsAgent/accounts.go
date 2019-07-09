@@ -68,6 +68,12 @@ func (a *accountsMgr) diff() bool {
 		return true
 	}
 
+	oldOSLoginEnable := oldMetadata.Instance.Attributes.EnableOSLogin || oldMetadata.Project.Attributes.EnableOSLogin
+	osLoginEnable := newMetadata.Instance.Attributes.EnableOSLogin || newMetadata.Project.Attributes.EnableOSLogin
+	if oldOSLoginEnable && !osLoginEnable {
+		return true
+	}
+
 	// If any existing keys have expired.
 	for _, keys := range sshKeys {
 		if len(keys) != len(removeExpiredKeys(keys)) {
@@ -122,7 +128,7 @@ func (a *accountsMgr) set() error {
 		mdKeyMap[user] = userKeys
 	}
 
-	var writeFile bool
+	//var writeFile bool
 	gUsers, err := readGoogleUsersFile()
 	if err != nil {
 		logger.Errorf("Couldn't read google users file: %v.", err)
@@ -130,6 +136,7 @@ func (a *accountsMgr) set() error {
 
 	// Update SSH keys, creating Google users as needed.
 	for user, userKeys := range mdKeyMap {
+		logger.Debugf("checking user %q", user)
 		if _, err := getPasswd(user); err != nil {
 			logger.Infof("Creating user %s.", user)
 			if err := createGoogleUser(user); err != nil {
@@ -137,10 +144,10 @@ func (a *accountsMgr) set() error {
 				continue
 			}
 			gUsers[user] = ""
-			writeFile = true
+			//writeFile = true
 		}
 		if _, ok := gUsers[user]; !ok {
-			logger.Infof("Adding existing user %s to google-sudoers group.", user)
+			logger.Infof("Adding user %s to google-sudoers group.", user)
 			if err := addUserToGroup(user, "google-sudoers"); err != nil {
 				logger.Errorf("%v.", err)
 			}
@@ -164,16 +171,16 @@ func (a *accountsMgr) set() error {
 				logger.Errorf("Error removing user: %v.", err)
 			}
 			delete(sshKeys, user)
-			writeFile = true
+			//		writeFile = true
 		}
 	}
 
 	// Update the google_users file if we've added or removed any users.
-	if writeFile {
-		if err := writeGoogleUsersFile(); err != nil {
-			logger.Errorf("Error writing google_users file: %v.", err)
-		}
+	//if writeFile {
+	if err := writeGoogleUsersFile(); err != nil {
+		logger.Errorf("Error writing google_users file: %v.", err)
 	}
+	//}
 	return nil
 }
 
@@ -251,10 +258,11 @@ func writeGoogleUsersFile() error {
 
 	gfile, err := os.OpenFile(googleUsersFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err == nil {
-		defer gfile.Close()
+		defer closer(gfile)
 		for user := range sshKeys {
 			fmt.Fprintf(gfile, "%s\n", user)
 		}
+		logger.Debugf("wrote %d names to google users file", len(sshKeys))
 	}
 	return err
 }
@@ -317,7 +325,8 @@ func runUserGroupCmd(cmd, user, group string) error {
 	cmd = strings.Replace(cmd, "{user}", user, 1)
 	cmd = strings.Replace(cmd, "{group}", group, 1)
 	cmds := strings.Fields(cmd)
-	return exec.Command(cmds[0], cmds[1:]...).Run()
+	//logger.Debugf("running command %q", cmd)
+	return runCmd(exec.Command(cmds[0], cmds[1:]...))
 }
 
 // createGoogleUser creates a Google managed user account if needed and adds it
@@ -392,7 +401,7 @@ func createSudoersGroup() error {
 }
 
 func addUserToGroup(user, group string) error {
-	gpasswdadd := config.Section("Accounts").Key("useradd_").MustString("gpasswd -a {user}")
+	gpasswdadd := config.Section("Accounts").Key("useradd_").MustString("gpasswd -a {user} {group}")
 	return runUserGroupCmd(gpasswdadd, user, group)
 }
 
